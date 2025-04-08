@@ -2,28 +2,29 @@ import cv2
 import mediapipe as mp
 import numpy as np
 from math import atan2
-import pyrealsense2 as rs
+import pyrealsense2 as rs  # Optional, not used in this webcam version
 import requests
 
-class PoseEstimator():
+class PoseEstimator:
     def __init__(self, server_url):
         self.server_url = server_url
+        self.speed = "slow"
+        self.last_speed = None
 
-        # Joint angle limits
+        self.left_active = False
+        self.right_active = False
+
+        self.detected_hands = []
+        self.active_hands = []
+        self.handedness = []
+
+        # Angle limits for gesture detection
         self.lower_limit_armpit = 50
         self.upper_limit_armpit = 130
         self.lower_limit_elbow = 100
         self.upper_limit_elbow = 180
 
-        # State
-        self.speed = "slow"
-        self.last_speed = None
-        self.left_active = False
-        self.right_active = False
-        self.detected_hands = []
-        self.handedness = []
-
-        # MediaPipe setup
+        # Mediapipe modules
         self.mp_pose = mp.solutions.pose
         self.mp_hands = mp.solutions.hands
         self.mp_drawing = mp.solutions.drawing_utils
@@ -64,12 +65,8 @@ class PoseEstimator():
         return True if extended == 5 else False if extended == 0 else None
 
     def get_speed(self):
-        for i, hand in enumerate(self.detected_hands):
+        for i, hand in enumerate(self.active_hands):
             label = self.handedness[i].classification[0].label
-            active = (label == "Left" and self.left_active) or (label == "Right" and self.right_active)
-            if not active:
-                continue
-
             tips = [
                 self.mp_hands.HandLandmark.THUMB_TIP,
                 self.mp_hands.HandLandmark.INDEX_FINGER_TIP,
@@ -165,26 +162,36 @@ class PoseEstimator():
                 self.right_active = abs(rw[1] - rs[1]) < 0.5 and abs(rw[0] - rs[0]) < 0.5
 
                 self.detected_hands = []
+                self.active_hands = []
                 self.handedness = hands_results.multi_handedness if hands_results.multi_handedness else []
                 hand_open = None
 
                 if hands_results.multi_hand_landmarks:
                     for i, hl in enumerate(hands_results.multi_hand_landmarks):
                         label = self.handedness[i].classification[0].label
-                        active = (label == "Left" and self.left_active) or (label == "Right" and self.right_active)
+                        is_left = label == "Left"
+                        active = (is_left and self.left_active) or (not is_left and self.right_active)
+
                         if active:
-                            self.mp_drawing.draw_landmarks(image, hl, self.mp_hands.HAND_CONNECTIONS)
-                            self.detected_hands.append(hl)
-                            open_check = self.is_open(hl)
-                            if open_check is True:
-                                hand_open = True
-                            elif open_check is False and hand_open is not True:
-                                hand_open = False
+                            wrist = hl.landmark[self.mp_hands.HandLandmark.WRIST]
+                            shoulder = ls if is_left else rs
+                            near_shoulder = abs(wrist.x - shoulder[0]) < 0.5 and abs(wrist.y - shoulder[1]) < 0.5
+
+                            if near_shoulder:
+                                self.mp_drawing.draw_landmarks(image, hl, self.mp_hands.HAND_CONNECTIONS)
+                                self.detected_hands.append(hl)
+                                self.active_hands.append(hl)
+
+                                open_check = self.is_open(hl)
+                                if open_check is True:
+                                    hand_open = True
+                                elif open_check is False and hand_open is not True:
+                                    hand_open = False
 
                 x_vals = [ls[0], rs[0], lw[0], rw[0], le[0], re[0], lh[0], rh[0]]
                 gesture = self.get_gesture(laa, raa, lea, rea, x_vals, hand_open)
 
-                if self.detected_hands:
+                if self.active_hands:
                     new_speed = self.get_speed()
                     if new_speed != self.last_speed:
                         print(f"Detected speed: {new_speed}")
